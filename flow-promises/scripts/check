@@ -1,0 +1,101 @@
+#!/bin/sh
+# Compiles a Quint flow to TLA+, checks it with the statechart checker, and renders the chart for the design surface.
+set -eu
+
+usage='Usage: check FLOW.qnt [--config FILE] [--view FILE] [--out DIR]
+
+Compiles the module named like FLOW.qnt to TLA+ and runs the statechart checker on it. Renders
+chart.mmd with Pele to chart.svg, and copies both beside the flow as FLOW.mmd and FLOW.svg
+for the design surface. With no chart.mmd, it deletes the old FLOW.mmd and FLOW.svg.
+  --config FILE  TLC config. Default: FLOW.cfg beside the flow.
+  --view FILE    The statechart view module (see statechart/GUIDE.md). Use a .mts file inside a repo.
+  --out DIR      A new or empty folder. Default: FLOW-chart beside the flow.
+Exit code: the exit code of the statechart checker, or 2 when the flow does not compile or Pele
+cannot render the chart.'
+
+flow=
+config=
+view=
+out=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --config|--view|--out) [ $# -ge 2 ] || { echo "$1 needs a value." >&2; exit 2; } ;;
+  esac
+  case $1 in
+    --config) config=$2; shift 2 ;;
+    --view) view=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    -h|--help) echo "$usage"; exit 0 ;;
+    -*) echo "Unknown option $1" >&2; echo "$usage" >&2; exit 2 ;;
+    *) [ -z "$flow" ] || { echo "Give one FLOW.qnt." >&2; exit 2; }; flow=$1; shift ;;
+  esac
+done
+[ -n "$flow" ] || { echo "$usage" >&2; exit 2; }
+[ -f "$flow" ] || { echo "Cannot find $flow." >&2; exit 2; }
+case $flow in *.qnt) ;; *) echo "$flow is not a .qnt file." >&2; exit 2 ;; esac
+config=${config:-${flow%.qnt}.cfg}
+[ -f "$config" ] || { echo "Cannot find the TLC config $config. Pass --config FILE." >&2; exit 2; }
+out=${out:-${flow%.qnt}-chart}
+name=$(basename "$flow" .qnt)
+grep -Eq "^[[:space:]]*module[[:space:]]+$name([[:space:]{]|\$)" "$flow" ||
+  { echo "$flow has no module named $name. Name the main module after the file." >&2; exit 2; }
+
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+here=$(cd "$(dirname "$self")" && pwd)
+statechart=$(cd "$here/../statechart/scripts" && pwd)/statechart
+[ -x "$statechart" ] || { echo "Cannot find the statechart checker at $statechart." >&2; exit 2; }
+
+if command -v quint >/dev/null; then
+  quint() { command quint "$@"; }
+else
+  quint() { npx --yes @informalsystems/quint@0.33.0 "$@"; }
+fi
+
+# Quint compiles with Apalache, which needs Java 21 or later on PATH.
+major=$(java -version 2>&1 | sed -n '1s/.*version "\([0-9]*\).*/\1/p') || :
+if [ "${major:-0}" -lt 21 ]; then
+  java_bin=$(mise which java --tool java@temurin-25 2>/dev/null) || {
+    mise install java@temurin-25 >&2 && java_bin=$(mise which java --tool java@temurin-25)
+  } || { echo "Quint needs Java 21 or later. Put it on PATH, or install mise." >&2; exit 2; }
+  PATH=$(dirname "$java_bin"):$PATH
+  export PATH
+fi
+
+abs_flow=$(cd "$(dirname "$flow")" && pwd)/$(basename "$flow")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/flow-promises.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+if ! (cd "$tmp" && quint compile --target tlaplus --main "$name" "$abs_flow" >"$name.tla" 2>compile.err); then
+  grep -v -e '^npm notice' -e 'protobuf' -e '^WARNING' "$tmp/compile.err" >&2 || :
+  echo "$flow does not compile." >&2
+  exit 2
+fi
+
+jar=$(ls -d "${QUINT_HOME:-$HOME/.quint}"/apalache-dist-*/apalache/lib/apalache.jar 2>/dev/null | tail -n 1)
+[ -n "$jar" ] || { echo "Cannot find apalache.jar under ~/.quint. Run quint compile once." >&2; exit 2; }
+for module in Apalache Variants; do
+  unzip -p "$jar" "tla2sany/StandardModules/$module.tla" >"$tmp/$module.tla"
+done
+cp "$config" "$tmp/$name.cfg"
+
+set -- "$tmp/$name.tla" --config "$tmp/$name.cfg" --out "$out"
+[ -z "$view" ] || set -- "$@" --view "$view"
+status=0
+"$statechart" "$@" || status=$?
+[ "$status" -le 1 ] || exit "$status"
+
+surface=${flow%.qnt}
+if [ -f "$out/chart.mmd" ]; then
+  node "$here/render.mjs" "$out/chart.mmd" "$out/chart.svg" || exit 2
+  cp "$out/chart.mmd" "$surface.mmd"
+  cp "$out/chart.svg" "$surface.svg"
+  echo "Rendered $surface.svg for the design surface."
+else
+  rm -f "$surface.mmd" "$surface.svg"
+  echo "The statechart checker drew no chart, so the design surface has no chart. Make the model smaller." >&2
+fi
+exit "$status"

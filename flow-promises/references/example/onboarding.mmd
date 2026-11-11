@@ -1,0 +1,33 @@
+---
+title: "Onboarding"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HomeIsFinal bug
+    lg1: Repeats forever, so HomeIsFinal breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Welcome
+  s1: Home
+  s2: Profile
+  s3: Profile, saving
+  s4: Home, saving
+  s5: Invite
+  [*] --> s0
+  s0 --> s1: you press Skip
+  s0 --> s2: you press Get started
+  s2 --> s1: you press Skip
+  s2 --> s3: you press Save
+  s3 --> s2: the save fails
+  s3 --> s4: you press Skip
+  s3 --> s5: the save succeeds
+  s4 --> s1: the save fails
+  s4 --> s5: the save succeeds
+  s5 --> s1: you press Send invites or you press Skip
+  class s0 bugPath
+  class s1 repeats
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
